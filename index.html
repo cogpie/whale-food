@@ -1,0 +1,408 @@
+<!DOCTYPE html>
+<html>
+<head><title>Whale Food</title></head>
+<body style="padding:0;margin:0;border:0;overflow:hidden"><div style="padding:5px;margin:0;border:0;background-color:#000;overflow:hidden"><div style="padding:0;margin:0;border:0;" id="game"></div></div></body>
+</html>
+<style type="text/css">
+  /* So the 'font-family' cannot be three words long to work eg. "my named font" will fail, but "my_named font" will work!
+
+     Nothing stopping this in the definition https://www.w3.org/TR/2018/REC-css-fonts-3-20180920/#font-family-desc ,
+     they even have an example "New Century Schoolbook" which they have quoted, but it didn't need to be...
+
+     So this is a bug in the setFont function of the TextStyle object in Phaser3, the _else_ section starting at this line:
+     https://github.com/photonstorm/phaser/blob/v3.50.0/src/gameobjects/text/TextStyle.js#L572
+     only accepts the 2nd or 3rd (' ' delimited) token as the font family.
+
+     But how does this work for "my_named font" then? So for a string such as '123px "my_named font"' we would get a result
+     of { fontStyle='123px', fontSize='"my_named', fontFamily='font"' }. I suspect these get recombined as a string to
+     form '123px "my_named font"' before being passed to render, so it gets correctly interpreted downstream. Whereas
+     '123px "my named font"' would become { fontStyle='123px', fontSize='"my', fontFamily='named' } which would be
+     recombined as '123px "my named' and so fail. I didn't check the render code but I imagine it is something like this.
+  */
+
+  /* COLR most supported color font - https://www.colorfonts.wtf/#w-node-85d8080e63a6-0134536f */
+  @font-face {
+    /* https://github.com/googlefonts/noto-emoji/ */
+    /* does not work in most browsers */
+    font-family:"noto_cbdt";
+    src:url("NotoColorEmoji.ttf") format("truetype");
+  }
+  @font-face {
+    /* https://github.com/eosrei/twemoji-color-font/releases based on https://twemoji.twitter.com/ v12 */
+    /* does not work in most browsers */
+    font-family:"twemoji_svg_12";
+    src:url("TwitterColorEmoji-SVGinOT.ttf") format("truetype");
+  }
+  @font-face {
+    /* https://github.com/mozilla/twemoji-colr/releases based on https://twemoji.twitter.com/ v12 */
+    /* no seal */
+    font-family:"twemoji_colr_12";
+    src:url("TwemojiMozilla.ttf") format("truetype");
+  }
+  @font-face {
+    /* https://github.com/matrix-org/matrix-react-sdk/pull/4672 based on https://twemoji.twitter.com/ v13 */
+    /* https://caniuse.com/woff2 */
+    font-family:"twemoji_colr_13";
+    src:url("TwemojiMozilla-colr.woff2") format("woff2");
+  }
+</style>
+<script type="text/javascript">
+    var _gaq=[['_setAccount','UA-21228438-1'],['_trackPageview']];
+</script>
+<script type='text/javascript' async='' src='https://www.google-analytics.com/ga.js'></script>
+<script type="text/javascript" src="phaser.min.js"></script>
+<script type="text/javascript">
+/*
+=== version alpha
+- Initial version...
+
+=== version 1
+- DONE reduce size and center location of collision box of whale
+- DONE ensure sea life cannot be 0px in size... in fact, tiny fonts are invisible too (min of 4 pixels)
+- DONE whale drag picks appropriate rotation to align with direction
+- DONE add shift key to make whale move faster using keys
+- DONE add game help text
+- DONE use known external font
+   - DONE update Twemoji to unicode 13 to bring in seal
+- DONE allow any key to restart game
+
+=== version 2+
+- more fluid sea life motion
+  - different movement for each type?
+  - do things in a more Phaser way – animations, velocities, etc.
+- spawn more sea life ove the game? Currently, more spawned each round
+- does whale die if it doesn't eat? (Carles) Currently, yes, I guess so, then a new round starts
+- use custom font file with only glyphs needed to reduce size
+- fix sea life hiding in border when small?
+- use multiple fonts in Phaser text so whale in help text is the same as the one in the game
+- only display title and help for first invocation of the game
+- should the mild eco message be made stronger, linked to websites in this space? (Tania)
+*/
+
+var PI = Math.PI;
+var config = {
+    type: Phaser.AUTO,
+    parent: 'game',
+    scale: {
+        parent: 'game',
+        autoCenter: Phaser.Scale.CENTER_BOTH,
+        width: window.innerWidth - 10,
+        height: window.innerHeight - 10,
+    },
+    physics: {
+        default: 'arcade',
+        arcade: {
+            debug: false
+        }
+    },
+    scene: {
+        preload: preload,
+        create: create,
+        update: update,
+    }
+};
+var game = new Phaser.Game(config);
+var cursors;
+
+var whaleText = decodeURI(query_str_to_obj(location.search)["whaleText"] || '\u{1F40B}');
+var whale;
+var whaleRotationTwist = 0;
+var whaleRotationDirection = 1;
+var whaleRotationSteps = 17;
+var whaleCartStep = 4;
+var whaleDiagStep = Math.sqrt((whaleCartStep * whaleCartStep) / 2);
+var whaleCartStepFast = 20;
+var whaleDiagStepFast = Math.sqrt((whaleCartStepFast * whaleCartStepFast) / 2);
+
+// https://www.emojis.com/animals/marine/
+var seaLifeText = ['\u{1F9DC}', '\u{1F9AD}', '\u{1F420}', '\u{1F433}', '\u{1F42C}', '\u{1F41F}', '\u{1F421}', '\u{1F988}', '\u{1F419}', '\u{1F41A}', '\u{1F980}', '\u{1F99E}', '\u{1F990}', '\u{1F991}'];
+var seaLife = [];
+var seaLifeCount = parseInt(query_str_to_obj(location.search)["seaLife"]) || 10;
+
+var titleText;
+var titlePause = (new Date()).getTime();
+var helpText;
+var eaten = 0;
+var eatenText;
+var textBareFont = 'Ubuntu';
+var textFont = '"' + textBareFont + '"';
+var emojiBareFont = query_str_to_obj(location.search)["font"] || 'twemoji_colr_13';
+var emojiFont = '"' + emojiBareFont + '"';
+
+var updateFunctions = [];
+var dragOver;
+var keyDownOver;
+
+function query_str_to_obj(queryStr) {
+    const queryKVStrs = queryStr.split(/[?&]/);
+    var queryObj = {};
+    for (var i in queryKVStrs) {
+      queryKV = queryKVStrs[i].split('=', 2);
+      queryObj[queryKV[0]] = queryKV[1];
+    }
+    delete queryObj[""]; // deals with query = "" or = "?"
+    return queryObj;
+}
+
+function query_obj_to_str(queryObj) {
+    var queryKVStrs = [];
+    for (var key in queryObj) {
+        if (queryObj[key] !== undefined) {
+            queryKVStrs.push(key + "=" + queryObj[key]);
+        } else {
+            queryKVStrs.push(key);
+        }
+    }
+    return '?' + queryKVStrs.join('&');
+}
+
+function preload ()
+{
+    this.load.script('webfont', 'https://ajax.googleapis.com/ajax/libs/webfont/1.6.26/webfont.js');
+}
+
+function create_sea_life(game) {
+    var newSeaLife;
+
+    while (! newSeaLife) {
+        var x = Math.floor(Math.random() * game.scale.gameSize.width);
+        var y = Math.floor(Math.random() * game.scale.gameSize.height);
+        var s = Math.floor(Math.random() * 36) + 6;
+        var l = seaLifeText[Math.floor(Math.random() * seaLifeText.length)];
+        try {
+            newSeaLife = game.add.text(x, y, l, { font: s + 'px ' + emojiFont, color: '#000' });
+            newSeaLife.depth = Math.random() * 2 - 1;
+            game.physics.world.enable(newSeaLife);
+            var hs = Math.ceil(s / 2);
+            newSeaLife.body.setSize(hs, hs);
+            newSeaLife.body.setCollideWorldBounds(true);
+            newSeaLife.setOrigin(0.5, 0.5);
+        }
+        catch (err) {
+            // This is because we get DOMException sometimes because the canvas size
+            // reports 0 on occasion... a creation race condition?
+        }
+    }
+
+    seaLife.push(newSeaLife);
+}
+
+function create_whale(game) {
+    var centerX = game.cameras.main.centerX;
+    var centerY = game.cameras.main.centerY;
+
+    whale = game.add.text(centerX, centerY - 100, whaleText, { font: '128px ' + emojiFont, color: '#000' });
+
+    var whaleWidth = whale.canvas.width;
+    var whaleHeight = whale.canvas.height;
+
+    game.physics.world.enable(whale);
+    whale.body.setCollideWorldBounds(true);
+    whale.setOrigin(0.5, 0.5);
+    whale.body.setSize(whaleWidth - 60, whaleHeight - 80);
+    whale.body.setOffset(30, 40);
+    whale.setInteractive({ draggable: true, useHandCursor: true });
+    whale.on('drag', drag_whale);
+    whale.input.hitArea.setTo(20, 20, whaleWidth - 40, whaleHeight - 40);
+    whale.depth = 0;
+}
+
+function create_text(game) {
+    var centerX = game.cameras.main.centerX;
+    var centerY = game.cameras.main.centerY;
+
+    eatenText = game.add.text(16, 16, 0, { font: '64px ' + textFont, fill: '#0000ff44' });
+    titleText = game.add.text(centerX, centerY, 'Whale Food', { font: 'bold 128px ' + textFont, fill: '#0088ff' });
+    titleText.setOrigin(0.5, 0.5);
+    helpTextStr = 'drag \u{1F40B} with mouse/finger, or\nmove \u{1F40B} with arrow keys\n(hold shift to go faster)';
+    helpText = game.add.text(centerX, centerY + 100, helpTextStr, { font: 'bold 20px ' + textFont, fill: '#0088ff', align: 'center' });
+    helpText.setOrigin(0.5, 0.5);
+}
+
+function create_game(game) {
+    cursors = game.input.keyboard.createCursorKeys();
+    cursors.any = { countDown: 0 };
+    game.input.keyboard.on('keydown', function (event) { cursors.any.countDown += 1; });
+    game.input.keyboard.on('keyup', function (event) { cursors.any.countDown -= 1; });
+    game.cameras.main.backgroundColor = Phaser.Display.Color.HexStringToColor("#99ccff");
+
+    for (var i = 0; i < seaLifeCount; i++) create_sea_life(game);
+    create_whale(game);
+    game.physics.add.overlap(whale, seaLife, eat_sea_life, null, game);
+    create_text(game);
+
+    updateFunctions = [update_whale, update_sea_life, is_game_over, update_title_and_help];
+}
+
+function create() {
+    var game = this;
+    var testStrings = {};
+    testStrings[emojiBareFont] = seaLifeText.join("") + whaleText;
+    WebFont.load({
+        google: {
+            families: [ textBareFont ]
+        },
+        custom: {
+            families: [ emojiBareFont ]
+        },
+        testStrings: testStrings,
+        active: function() { create_game(game) },
+    });
+}
+
+function eat_sea_life(whale, eatenSeaLife) {
+    for (var i = 0; i < seaLife.length; i++) {
+        if (seaLife[i] == eatenSeaLife) {
+            seaLife.splice(i, 1);
+            // not available for text, so need to do it manually
+            // eatenSeaLife.disableBody(true, true);
+            eatenSeaLife.active = false;
+            eatenSeaLife.visible = false;
+            eaten++;
+            eatenText.setText(eaten);
+            return;
+        }
+    }
+}
+
+function update_sea_life(game) {
+    for (var i = 0; i < seaLife.length; i++) {
+        var x = Math.floor(Math.random() * 11) - 5;
+        var y = Math.floor(Math.random() * 11) - 5;
+        seaLife[i].x += x;
+        seaLife[i].y += y;
+    }
+}
+
+function rotate_whale(whaleRotationBase) {
+    whaleRotationTwist += 1;
+    if (whaleRotationTwist % whaleRotationSteps == 0) whaleRotationDirection *= -1;
+    whale.rotation = whaleRotationBase + ((whaleRotationTwist % whaleRotationSteps)
+        - Math.floor(whaleRotationSteps / 2)) * 0.01 * whaleRotationDirection;
+}
+
+function move_whale(x, y, rotation) {
+    whale.x += x;
+    whale.y += y;
+    rotate_whale(rotation);
+}
+
+function drag_whale(pointer, dragX, dragY) {
+    var deltaY = dragY - whale.y;
+    var deltaX = dragX - whale.x;
+    var posX = deltaX >= 0;
+    var posY = deltaY >= 0;
+    var rotation = 0;
+
+    if (deltaX == 0 && deltaY == 0) return;
+    else if (posX && deltaY == 0) rotation = PI; // right
+    else if (!posX && deltaY == 0) rotation = 0; // left
+    else if (deltaX == 0 && posY) rotation = 3 * PI / 2; // down
+    else if (deltaX == 0 && !posY) rotation = PI / 2; // up
+    else {
+        var opposite = Math.abs(deltaY);
+        var adjacent = Math.abs(deltaX);
+        var tan = opposite / adjacent;
+        var rotation = PI / 4;
+        if (tan < Math.tan(PI / 8)) rotation = 0;
+        else if (tan > Math.tan(3 * PI / 8)) rotation = PI / 2;
+
+        if (posX && !posY) rotation = PI - rotation;
+        else if (!posX && posY) rotation = -rotation;
+        else if (posX && posY) rotation = rotation - PI;
+    }
+
+    move_whale(deltaX, deltaY, rotation);
+}
+
+function update_whale(game) {
+    var goingDown = cursors.down.isDown;
+    var goingUp = cursors.up.isDown;
+    var goingLeft = cursors.left.isDown;
+    var goingRight = cursors.right.isDown;
+
+    var cartStep = whaleCartStep;
+    var diagStep = whaleDiagStep;
+    if (cursors.shift.isDown) {
+        cartStep = whaleCartStepFast;
+        diagStep = whaleDiagStepFast;
+    }
+
+    if (goingLeft && goingDown) move_whale(-diagStep, diagStep, -PI / 4);
+    else if (goingLeft && goingUp) move_whale(-diagStep, -diagStep, PI / 4);
+    else if (goingRight && goingUp) move_whale(diagStep, -diagStep, 3 * PI / 4);
+    else if (goingRight && goingDown) move_whale(diagStep, diagStep, 5 * PI / 4);
+    else if (goingDown) move_whale(0, cartStep, -PI / 2);
+    else if (goingLeft) move_whale(-cartStep, 0, 0);
+    else if (goingUp) move_whale(0, -cartStep, PI / 2);
+    else if (goingRight) move_whale(cartStep, 0, PI);
+}
+
+function is_game_over(game) {
+    if (eaten >= seaLifeCount) {
+        game.physics.world.colliders.destroy();
+        
+        whale.active = false;
+        whale.removeInteractive();
+        whale.x = game.cameras.main.centerX;
+        whale.y = game.cameras.main.centerY;
+        whale.scale = 6;
+        whale.alpha = 0.3;
+        whale.setColor('#fff');
+
+        titleText.visible = false;
+        helpText.visible = false;
+
+        eatenText.setText('No more food...');
+        eatenText.setColor('#fff');
+        eatenText.setOrigin(0.5, 0.5);
+        eatenText.setFontSize(128);
+        eatenText.x = game.cameras.main.centerX;
+        eatenText.y = game.cameras.main.centerY;
+
+        game.cameras.main.backgroundColor = Phaser.Display.Color.HexStringToColor("#000");
+
+        dragOver = ! game.input.activePointer.isDown;
+        keyDownOver = cursors.any.countDown == 0;
+
+        updateFunctions = [do_game_over];
+    }
+}
+
+function do_game_over(game) {
+    if (whale.alpha > 0) {
+        whale.rotation += PI / 200;
+        whale.alpha -= 0.00075;
+    }
+    if ((keyDownOver && cursors.any.countDown > 0) || (dragOver && game.input.activePointer.isDown)) {
+        var queryObj = query_str_to_obj(location.search);
+        queryObj["seaLife"] = seaLifeCount + 10;
+        location.search = query_obj_to_str(queryObj);
+    }
+    if (! game.input.activePointer.isDown) dragOver = true;
+    if (cursors.any.countDown == 0) keyDownOver = true;
+}
+
+function update_title_and_help(game) {
+    if (titleText.visible && (titlePause + 3000) < (new Date()).getTime()) {
+        titleText.alpha -= 0.05;
+        helpText.alpha -= 0.075;
+        titleText.scale += 0.05;
+        if (titleText.alpha <= 0) {
+            titleText.visible = false;
+            titleText.active = false;
+            helpText.visible = false;
+            helpText.active = false;
+            for (var i = 0; i < updateFunctions.length; i++) {
+                if (updateFunctions[i] == update_title_and_help) {
+                    updateFunctions.splice(i, 1);
+                }
+            }
+        }
+    }
+}
+
+function update(time, delta) {
+    for (var i = 0; i < updateFunctions.length; i++) updateFunctions[i](this);
+}
+</script>
